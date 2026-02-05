@@ -1,9 +1,8 @@
 """
 간단한 Flask 웹 대시보드
 
-- 헤드리스 환경(RPi SSH 등)에서도 동작
+- 실시간 카메라 영상 스트림 (Raspberry Pi + Picamera2 기준)
 - `main_predict.log` 내용을 웹에서 확인
-- 최근 캡처된 원두 이미지를 "프리뷰" 처럼 보여줌
 
 실행:
     cd ~/Documents
@@ -15,20 +14,26 @@
 
 from __future__ import annotations
 
+import io
 import threading
 import time
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template_string, request, send_file
+import cv2
+from flask import Flask, Response, jsonify, render_template_string, request
+
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    Picamera2 = None  # type: ignore
 
 
 app = Flask(__name__)
 
 # =========================
-# Log / 이미지 설정
+# Log 설정
 # =========================
 PREDICT_LOG_FILE = Path.home() / "Documents" / "main_predict.log"
-BEAN_IMAGE_DIR = Path.home() / "Documents" / "bean_images"
 
 
 def tail_log(path: Path, lines: int = 100) -> list[str]:
@@ -46,6 +51,83 @@ def tail_log(path: Path, lines: int = 100) -> list[str]:
 
     all_lines = data.splitlines()
     return all_lines[-lines:]
+
+
+# =========================
+# Camera 설정
+# =========================
+camera_lock = threading.Lock()
+picam2: Picamera2 | None = None
+use_opencv_fallback = False
+cap: cv2.VideoCapture | None = None
+
+
+def init_camera():
+    """Picamera2 우선 사용, 실패 시 /dev/video0 OpenCV 사용."""
+    global picam2, cap, use_opencv_fallback
+
+    if Picamera2 is not None:
+        try:
+            cam = Picamera2()
+            cfg = cam.create_video_configuration(
+                main={"size": (1280, 720), "format": "RGB888"}
+            )
+            cam.configure(cfg)
+            cam.start()
+            time.sleep(0.3)
+            picam2 = cam
+            use_opencv_fallback = False
+            print("[web] Using Picamera2 for live stream")
+            return
+        except Exception as e:
+            print(f"[web] Picamera2 init failed: {e}")
+
+    # fallback: 일반 USB/Webcam
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("카메라를 열 수 없습니다. Picamera2 / /dev/video0 둘 다 실패.")
+    use_opencv_fallback = True
+    print("[web] Using OpenCV VideoCapture(0) for live stream")
+
+
+def get_frame_bgr() -> "cv2.Mat":
+    """현재 BGR 프레임 하나 가져오기."""
+    if not use_opencv_fallback and picam2 is not None:
+        with camera_lock:
+            frame = picam2.capture_array()
+        # RGB888 → BGR
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return frame_bgr
+
+    if cap is None:
+        raise RuntimeError("카메라가 초기화되지 않았습니다.")
+
+    ret, frame_bgr = cap.read()
+    if not ret:
+        raise RuntimeError("카메라 프레임을 읽지 못했습니다.")
+    return frame_bgr
+
+
+def generate_frames():
+    """multipart/x-mixed-replace 로 MJPEG 스트림 생성."""
+    while True:
+        try:
+            frame_bgr = get_frame_bgr()
+            # 필요하면 여기에서 resize 가능
+            # frame_bgr = cv2.resize(frame_bgr, (960, 540))
+
+            ret, buffer = cv2.imencode(".jpg", frame_bgr)
+            if not ret:
+                continue
+
+            jpg_bytes = buffer.tobytes()
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + jpg_bytes + b"\r\n"
+            )
+        except Exception as e:
+            print(f"[web] generate_frames error: {e}")
+            time.sleep(0.1)
 
 
 # =========================
@@ -164,16 +246,16 @@ INDEX_HTML = """
     <header>
       <div>
         <h1>FocalNet Green Bean Monitor</h1>
-        <span>최근 캡처 이미지 &amp; 예측 로그</span>
+        <span>실시간 카메라 프리뷰 &amp; 예측 로그</span>
       </div>
       <span id="status">연결 확인 중...</span>
     </header>
 
     <main>
       <section class="card">
-        <header><h2>Last Captured Bean Image</h2></header>
+        <header><h2>Live Camera</h2></header>
         <div class="video-wrapper">
-          <img id="bean-image" src="/latest_image" alt="Bean image">
+          <img src="{{ url_for('video_feed') }}" alt="Live video">
         </div>
       </section>
 
@@ -212,7 +294,7 @@ INDEX_HTML = """
           const data = await resp.json();
           const el = document.getElementById('status');
           if (data.ok) {
-            el.textContent = '웹 서버 동작 중 · 최근 이미지=' + (data.has_image ? '있음' : '없음');
+            el.textContent = '웹 서버 동작 중 · 카메라=' + (data.camera_ok ? 'OK' : '오프라인');
           } else {
             el.textContent = '에러: ' + data.message;
           }
@@ -221,20 +303,11 @@ INDEX_HTML = """
         }
       }
 
-      function refreshImage() {
-        const img = document.getElementById('bean-image');
-        if (!img) return;
-        const ts = Date.now();
-        img.src = '/latest_image?ts=' + ts;
-      }
-
-      // 주기적으로 상태/로그/이미지 갱신
+      // 주기적으로 상태/로그 갱신
       reloadLogs();
       pingStatus();
-      refreshImage();
       setInterval(reloadLogs, 5000);
       setInterval(pingStatus, 3000);
-      setInterval(refreshImage, 1000);
     </script>
   </body>
   </html>
@@ -244,6 +317,14 @@ INDEX_HTML = """
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+
+@app.route("/video_feed")
+def video_feed():
+    return Response(
+        generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @app.route("/logs")
@@ -264,25 +345,16 @@ def logs():
 
 @app.route("/status")
 def status():
-    has_image = (
-        BEAN_IMAGE_DIR.exists()
-        and any(BEAN_IMAGE_DIR.glob("bean_*.jpg"))
-    )
-    return jsonify({"ok": True, "has_image": has_image})
-
-
-@app.route("/latest_image")
-def latest_image():
-    if not BEAN_IMAGE_DIR.exists():
-        return Response(status=404)
-    images = sorted(BEAN_IMAGE_DIR.glob("bean_*.jpg"))
-    if not images:
-        return Response(status=404)
-    latest = images[-1]
-    return send_file(latest, mimetype="image/jpeg")
+    camera_ok = True
+    if use_opencv_fallback and (cap is None or not cap.isOpened()):
+        camera_ok = False
+    if not use_opencv_fallback and picam2 is None:
+        camera_ok = False
+    return jsonify({"ok": True, "camera_ok": camera_ok})
 
 
 def main():
+    init_camera()
     # 모든 네트워크에서 접속 가능하게 0.0.0.0 바인딩
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 

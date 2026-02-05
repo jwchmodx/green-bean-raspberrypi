@@ -8,7 +8,6 @@ Connects to:
 
 import json
 import logging
-import os
 import shutil
 import serial
 import time
@@ -583,19 +582,13 @@ if __name__ == "__main__":
     worker.start()
 
     # 실시간 카메라 창 (camera_test.py 스타일)
-    # DISPLAY가 없는(headless) 환경에서는 프리뷰 스레드를 띄우지 않고,
-    # 카메라 캡처/분류만 동작하게 한다.
-    if os.environ.get("DISPLAY"):
-        preview_thread = threading.Thread(target=preview_loop, daemon=True)
-        preview_thread.start()
-        preview_suffix = " (ESC in preview window to close it)"
-    else:
-        preview_suffix = " (no local preview window; use web_dashboard.py or saved images)"
+    preview_thread = threading.Thread(target=preview_loop, daemon=True)
+    preview_thread.start()
 
     if ser is not None:
-        print("\nRPi: ready, waiting for move_complete ..." + preview_suffix)
+        print("\nRPi: ready, waiting for move_complete ... (ESC in preview window to close it)")
     else:
-        print("\nRPi: ready (no serial). cmd> w / s / c / status / help ..." + preview_suffix)
+        print("\nRPi: ready (no serial). cmd> w / s / c / status / help ... (ESC in preview to close)")
 
     try:
         while running:
