@@ -7,6 +7,9 @@ Connects to:
 """
 
 import json
+import logging
+import os
+import shutil
 import serial
 import time
 import threading
@@ -23,11 +26,11 @@ from libcamera import controls
 # =========================
 # Configuration
 # =========================
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = "http://121.88.140.70:8000/api/v1"
 API_TIMEOUT = 10  # seconds
 
 # If False, skip API calls and use random GOOD/DEFECT for testing
-USE_API = False
+USE_API = True  # True: 실제 API /predict 사용. API 서버(localhost:8000) 실행 필요
 
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
@@ -68,6 +71,25 @@ def send_line(s: str):
 # =========================
 BASE_DIR = Path.home() / "Documents" / "bean_images"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
+(BASE_DIR / "normal").mkdir(exist_ok=True)
+(BASE_DIR / "defect").mkdir(exist_ok=True)
+
+# =========================
+# Predict 로그 (파일에 남김)
+# =========================
+PREDICT_LOG_FILE = Path.home() / "Documents" / "main_predict.log"
+
+def _setup_predict_log():
+    """예측 결과를 파일에 기록하는 로거 설정."""
+    log = logging.getLogger("predict")
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    fh = logging.FileHandler(PREDICT_LOG_FILE, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    log.addHandler(fh)
+    return log
+
+predict_logger: logging.Logger | None = None
 
 # =========================
 # Warp (4-point perspective) - 저장/로드 + 편집 상태
@@ -348,12 +370,23 @@ def classify_bean(img_path: str) -> tuple[int, float]:
 
         if response.status_code == 200:
             result = response.json()
-            class_idx = result.get("class_idx", 1)
+            api_class_idx = result.get("class_idx", 1)
             confidence = result.get("confidence", 0.0)
             class_name = result.get("class_name", "unknown")
             inference_time = result.get("inference_time_ms", 0)
 
-            print(f"[API] Prediction: {class_name} (idx={class_idx}, conf={confidence:.2%}, time={inference_time:.1f}ms)")
+            # API는 class_idx 0=defect, 1=normal 등 4클래스 사용. main은 0=good, 1=defect.
+            if class_name == "normal":
+                class_idx = 0  # good
+            else:
+                class_idx = 1  # defect (defect, two_defect, two_normal 등)
+
+            print(f"[API] Prediction: {class_name} -> main idx={class_idx} (conf={confidence:.2%}, time={inference_time:.1f}ms)")
+            if predict_logger:
+                predict_logger.info(
+                    f"img={img_path} api_idx={api_class_idx} class_name={class_name} main_idx={class_idx} "
+                    f"confidence={confidence:.4f} inference_time_ms={inference_time} raw={result}"
+                )
             return class_idx, confidence
         else:
             print(f"[API] Error response: {response.status_code} - {response.text}")
@@ -362,8 +395,9 @@ def classify_bean(img_path: str) -> tuple[int, float]:
     except requests.exceptions.Timeout:
         print("[API] Request timeout")
         return 1, 0.0
-    except requests.exceptions.ConnectionError:
-        print("[API] Connection error - is the server running?")
+    except requests.exceptions.ConnectionError as e:
+        print(f"[API] Connection error: {e}")
+        print(f"       URL: {API_BASE_URL}/predict - API 서버 실행 여부 확인 (예: cd green-bean-defect-detecting-ai/Kuffee && python run_api.py)")
         return 1, 0.0
     except Exception as e:
         print(f"[API] Classification failed: {e}")
@@ -389,6 +423,17 @@ def classification_worker():
 
         with bean_states_lock:
             bean_states[idx] = cls
+
+        # 판별 결과에 따라 normal/defect 폴더로 이동 (자동 데이터 수집)
+        src = Path(img_path)
+        if src.exists():
+            subdir = "normal" if cls == 0 else "defect"
+            dst = BASE_DIR / subdir / src.name
+            try:
+                shutil.move(str(src), str(dst))
+                print(f"[RPi] moved -> {subdir}/{src.name}")
+            except Exception as e:
+                print(f"[RPi] move failed: {e}")
 
         print(
             f"[RPi] bean idx={idx} classified as "
@@ -471,9 +516,9 @@ def handle_line(line: str):
 HELP = """
 [RPi Command]
   home        -> send HOME
-  zero        -> send ZERO
-  warp        -> 라이브뷰 창에서 와핑 4점 편집 모드 진입 (Enter=save, ESC=cancel)
-  warp_clear  -> 와핑 초기화 (저장된 4점 삭제, 원본 뷰로)
+  s           -> send ZERO
+  w           -> 라이브뷰 창에서 와핑 4점 편집 모드 진입 (Enter=save, ESC=cancel)
+  c           -> 와핑 초기화 (저장된 4점 삭제, 원본 뷰로)
   a/d/A/D     -> send JOG <key>
   status      -> check API health
   help        -> show help
@@ -498,12 +543,12 @@ def keyboard_loop():
             print(HELP)
         elif cmd == "home":
             send_line("HOME")
-        elif cmd == "zero":
+        elif cmd == "s":
             send_line("ZERO")
-        elif cmd == "warp":
+        elif cmd == "w":
             warp_request = True
             print("[Warp] Edit mode requested. Go to camera window and adjust 4 points (Enter=save, ESC=cancel).")
-        elif cmd == "warp_clear":
+        elif cmd == "c":
             clear_warp_points()
             print("[Warp] Cleared. Preview shows raw (no warp).")
         elif cmd in ["a", "d", "A", "D"]:
@@ -518,6 +563,8 @@ def keyboard_loop():
 # Main
 # =========================
 if __name__ == "__main__":
+    predict_logger = _setup_predict_log()
+    print(f"[RPi] Predict log file: {PREDICT_LOG_FILE}")
     # 저장된 와핑 4점 있으면 로드
     if load_warp_points() is not None:
         print(f"[RPi] Loaded warp points from {WARP_POINTS_FILE}")
@@ -536,13 +583,19 @@ if __name__ == "__main__":
     worker.start()
 
     # 실시간 카메라 창 (camera_test.py 스타일)
-    preview_thread = threading.Thread(target=preview_loop, daemon=True)
-    preview_thread.start()
+    # DISPLAY가 없는(headless) 환경에서는 프리뷰 스레드를 띄우지 않고,
+    # 카메라 캡처/분류만 동작하게 한다.
+    if os.environ.get("DISPLAY"):
+        preview_thread = threading.Thread(target=preview_loop, daemon=True)
+        preview_thread.start()
+        preview_suffix = " (ESC in preview window to close it)"
+    else:
+        preview_suffix = " (no local preview window; use web_dashboard.py or saved images)"
 
     if ser is not None:
-        print("\nRPi: ready, waiting for move_complete ... (ESC in preview window to close it)")
+        print("\nRPi: ready, waiting for move_complete ..." + preview_suffix)
     else:
-        print("\nRPi: ready (no serial). cmd> warp / status / help ... (ESC in preview to close)")
+        print("\nRPi: ready (no serial). cmd> w / s / c / status / help ..." + preview_suffix)
 
     try:
         while running:

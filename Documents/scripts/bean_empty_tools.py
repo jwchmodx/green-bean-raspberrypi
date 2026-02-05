@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 
 
-# 기본 대상 디렉터리 (스크립트 기준 bean_images)
+# 기본 대상 디렉터리 (스크립트 기준 bean_images, 하위 폴더 포함)
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DIR = SCRIPT_DIR.parent / "bean_images"
 
@@ -44,13 +44,13 @@ def is_empty_image(
 
 
 def cmd_tag(args: argparse.Namespace) -> None:
-    """원두 없는 흰 사진에 파일명 _empty 붙이기."""
+    """원두 없는 흰 사진에 파일명 _empty 붙이기. bean_images/ 하위 모든 jpg 대상."""
     target_dir = args.dir.resolve()
     if not target_dir.is_dir():
         print(f"Not a directory: {target_dir}")
         return
     renamed = 0
-    for path in sorted(target_dir.glob("*.jpg")):
+    for path in sorted(target_dir.rglob("*.jpg")):
         if path.name.endswith("_empty.jpg"):
             continue
         if not is_empty_image(
@@ -74,16 +74,16 @@ def cmd_tag(args: argparse.Namespace) -> None:
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
-    """파일명에 _empty 가 붙은 파일 전부 삭제."""
+    """조건(빈/흰 사진) 만족하는 jpg 전부 삭제. bean_images/ 하위 모든 jpg 대상."""
     target_dir = args.dir.resolve()
     if not target_dir.is_dir():
         print(f"Not a directory: {target_dir}")
         return
+    white_thresh = getattr(args, "white_thresh", WHITE_THRESH)
+    white_ratio = getattr(args, "white_ratio", WHITE_RATIO_MIN)
     removed = 0
-    for path in sorted(target_dir.iterdir()):
-        if not path.is_file():
-            continue
-        if "_empty" not in path.name:
+    for path in sorted(target_dir.rglob("*.jpg")):
+        if not is_empty_image(path, white_thresh=white_thresh, white_ratio_min=white_ratio):
             continue
         if args.dry_run:
             print(f"[DRY-RUN] would remove: {path.name}")
@@ -96,9 +96,14 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="원두 이미지 empty 전처리: tag(이름 붙이기) / remove(삭제)"
+        description="원두 이미지 empty 전처리. 인자 없으면 조건 만족(빈 사진) jpg 전부 삭제. tag=이름만 붙이기."
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("dir", nargs="?", type=Path, default=DEFAULT_DIR, help="대상 디렉터리 (기본: Documents/bean_images, 하위 폴더 포함)")
+    parser.add_argument("--dry-run", action="store_true", help="실제 삭제 없이 대상만 출력")
+    parser.add_argument("--white-thresh", type=int, default=WHITE_THRESH, help=f"흰 픽셀 기준 밝기 (기본 {WHITE_THRESH})")
+    parser.add_argument("--white-ratio", type=float, default=WHITE_RATIO_MIN, help=f"empty 판정 최소 흰 비율 (기본 {WHITE_RATIO_MIN})")
+    parser.set_defaults(func=cmd_remove)
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     def add_dir(p):
         p.add_argument("dir", nargs="?", type=Path, default=DEFAULT_DIR, help="대상 디렉터리 (기본: Documents/bean_images)")
@@ -111,10 +116,12 @@ def main() -> None:
     p_tag.add_argument("--white-ratio", type=float, default=WHITE_RATIO_MIN, help=f"empty 판정 최소 흰 비율 (기본 {WHITE_RATIO_MIN})")
     p_tag.set_defaults(func=cmd_tag)
 
-    # remove
-    p_remove = subparsers.add_parser("remove", help="_empty 붙은 파일 전부 삭제")
+    # remove (서브커맨드로도 사용 가능, tag와 동일 조건 사용)
+    p_remove = subparsers.add_parser("remove", help="조건 만족(빈 사진) 파일 전부 삭제 (인자 없을 때 기본 동작)")
     add_dir(p_remove)
     p_remove.add_argument("--dry-run", action="store_true", help="실제 삭제 없이 대상만 출력")
+    p_remove.add_argument("--white-thresh", type=int, default=WHITE_THRESH, help=f"흰 픽셀 기준 밝기 (기본 {WHITE_THRESH})")
+    p_remove.add_argument("--white-ratio", type=float, default=WHITE_RATIO_MIN, help=f"empty 판정 최소 흰 비율 (기본 {WHITE_RATIO_MIN})")
     p_remove.set_defaults(func=cmd_remove)
 
     args = parser.parse_args()
