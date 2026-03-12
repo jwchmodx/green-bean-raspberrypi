@@ -17,7 +17,7 @@ DEFAULT_DIR = SCRIPT_DIR.parent / "bean_images"
 
 # tag 모드: 흰 사진 판별 기준
 WHITE_THRESH = 175
-WHITE_RATIO_MIN = 0.92
+WHITE_RATIO_MIN = 0.75
 MEAN_MIN = 235
 
 

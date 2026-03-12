@@ -180,8 +180,17 @@ def capture_image(bean_id: int, pos: int) -> str:
     Returns:
         Image path or empty string on failure
     """
-    ts = int(time.time() * 1000)
-    img_path = BASE_DIR / f"bean_{bean_id:06d}_pos{pos}_{ts}.jpg"
+    # 과거에 지웠던 파일 이름과도 사실상 겹치지 않도록
+    # - ms 단위 타임스탬프
+    # - ns 단위 타임스탬프의 하위 9자리
+    # - 16bit 랜덤 값
+    # 을 모두 붙여서 매우 긴 고유 ID를 만든다.
+    ts_ms = int(time.time() * 1000)
+    ts_ns = time.time_ns() % 1_000_000_000
+    rand16 = random.getrandbits(16)
+    img_path = BASE_DIR / (
+        f"bean_{bean_id:06d}_pos{pos}_{ts_ms}_{ts_ns:09d}_{rand16:04x}.jpg"
+    )
     try:
         with camera_lock:
             frame = picam2.capture_array()
@@ -514,7 +523,7 @@ def handle_line(line: str):
 # =========================
 HELP = """
 [RPi Command]
-  home        -> send HOME
+  home/h      -> send HOME
   s           -> send ZERO
   w           -> 라이브뷰 창에서 와핑 4점 편집 모드 진입 (Enter=save, ESC=cancel)
   c           -> 와핑 초기화 (저장된 4점 삭제, 원본 뷰로)
@@ -540,7 +549,7 @@ def keyboard_loop():
             break
         elif cmd == "help":
             print(HELP)
-        elif cmd == "home":
+        elif cmd in ("home", "h"):
             send_line("HOME")
         elif cmd == "s":
             send_line("ZERO")
