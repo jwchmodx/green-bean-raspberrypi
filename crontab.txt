@@ -1,0 +1,1 @@
+* * * * * curl -sk -X POST "https://121.88.140.70:8080/api/ping?team=default" > /dev/null 2>&1
